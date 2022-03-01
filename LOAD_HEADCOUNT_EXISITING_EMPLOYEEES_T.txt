@@ -1,0 +1,206 @@
+* 
+ * Description: Morgan Weaver provides a monthly updated excel file for Consolidated Headcount in her Personal Onedrive for Business
+ * 				This script inserts the new data into the existing employees table after the latest month tab is saved as a csv
+ * 				
+ * Author: 		Grant Matson
+ * Date: 		9/29/20
+ * Comments: 
+ * 				2/17/21 Updated to include employee class for Jan 2021 forward
+ * 				3/4/2021 Updated to set all headcount records to 1 and Temp FTEs to 1
+ * 				1/5/21 Updated column positions to account for New Region change as notified by Hussain
+ * 					   Created new column CASH_INCENTIVE_TYPE now available on roster file
+*/
+
+----------------- !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  ------------------------------------------------------
+------------- SET THE MONTH BEFORE EXECUTING THE SCRIPT --------------------------------------------------------
+USE DATABASE FPA_SBX_ENV;
+SET vMonth = 'Jan';
+SET vYear = 2022;
+
+LIST @~;
+REMOVE @~/dbeaverTemp;
+
+PUT 'file://C:/Users/gmatson/ANSYS, Inc/FP&A Power BI Reporting - Documents/Headcount/Load_Consolidated_Headcount.csv' 
+@~/dbeaverTemp;
+
+-- Temp table setup to load and apply cleansing logic
+CREATE OR REPLACE TEMPORARY TABLE FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_TEMP
+(
+	Employee_ID   		VARCHAR,
+	Original_Hire_Date  DATE,
+	Rehire_Date   		DATE,
+	"Name"   			VARCHAR,
+	Title   			VARCHAR,
+	Job_Code	 		VARCHAR,
+	Cash_Incentive_Type	VARCHAR,
+	Legal_Entity   		VARCHAR,
+	Cost_Center   		VARCHAR,
+	Country   			VARCHAR,
+	Physical_Location   VARCHAR,
+	Lived_In_State   	VARCHAR,
+	Employee_Class   	VARCHAR,
+	Is_Fulltime_Employee VARCHAR,
+	Business_Unit   	VARCHAR,
+	Functional_Area     VARCHAR,
+	FTE   NUMBER(38,4)
+);
+
+--DROP FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_TEMP;
+--SELECT COUNT($1) FROM @~/dbeaverTemp (FILE_FORMAT => 'FPA_SBX_ENV.FPA_SBX_ENV_USER.INDUSTRY_T');
+
+INSERT INTO FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_TEMP
+--FROM 
+(
+	SELECT
+	$1     AS id
+	,$4    AS ORIGINAL_HIRE_DATE
+	,$5    AS RECENT_HIRE_DATE
+	,$2    AS NAME
+	,$17   AS TITLE
+	,$16   AS JOB_CODE
+	,$18   AS CASH_INCENTIVE_TYPE
+	,$6    AS LEGAL_ENTITY
+	,$8    AS COST_CENTER
+	,$15   AS COUNTRY
+	,$13   AS PHYSICAL_LOCATION
+	,$14   AS LIVED_IN_STATE
+	,$3    AS EMPLOYEE_CLASS
+	,$11   AS IS_FULLTIME
+	,$7    AS BU
+	,$9    AS FUNCTIONAL_AREA
+	,$10   AS FTE
+	FROM @~/dbeaverTemp (FILE_FORMAT => 'FPA_SBX_ENV.FPA_SBX_ENV_USER.INDUSTRY_T')
+	WHERE $1 IS NOT NULL
+);
+--FILE_FORMAT = (FORMAT_NAME = 'FPA_SBX_ENV.FPA_SBX_ENV_USER.INDUSTRY_T')  --preset csv format in snowflake  --(TYPE = 'CSV')
+--ON_ERROR = 'ABORT_STATEMENT' --'CONTINUE'--
+----	VALIDATION_MODE = 'RETURN_ERRORS'; --String (constant) that instructs the COPY command to validate the data files instead of loading them into the specified table; i.e. the COPY command tests the files for errors but does not load them. The command validates the data to be loaded and returns results based on the validation option specified:
+--PURGE = TRUE;
+
+
+
+-- DQ CHECKs------------------------------------------------------------------------
+--SELECT * FROM FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_TEMP WHERE EMPLOYEE_ID = 51222;
+SELECT count(*) FROM FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_TEMP;
+SELECT COST_CENTER FROM FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_TEMP;
+
+--duplicate check
+SELECT EMPLOYEE_ID, COUNT(*) FROM FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_TEMP 
+GROUP BY 1
+HAVING COUNT(*) >1;
+
+-- Intern as employee check
+SELECT EMPLOYEE_ID, "Name", EMPLOYEE_CLASS, TITLE, JOB_CODE, FTE FROM FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_TEMP 
+WHERE 
+	(UPPER(TITLE) LIKE '%INTERN%'
+		OR JOB_CODE = 'INTERN'
+	)
+AND EMPLOYEE_CLASS = 'Employee';
+
+ -- current table counts
+SELECT 
+"YEAR"
+,"MONTH"
+--,EMPLOYEE_TYPE
+,COUNT(*)
+,SUM(FTE)
+FROM FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_T
+GROUP BY 1, 2
+ORDER BY 1 DESC, 2;
+
+
+---------------------------------------------------------------------------------
+
+--DELETE FROM FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_T 
+--WHERE "MONTH" = 'Sep' AND "YEAR" = 2021;
+--ALTER TABLE FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_T ADD COLUMN CASH_INCENTIVE_TYPE VARCHAR(50);
+
+
+
+-- !!!!  CHANGE/CHECK YEAR & MONTH NAME BEFORE EACH LOAD!!!!!!!!!!! ------------------- --------
+-- !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ----------------------------
+INSERT INTO FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_T
+(
+	SELECT
+	$vYear									AS "YEAR"  --YEAR(CURRENT_DATE())
+	,$vMonth    							AS "MONTH"  --MONTHNAME(CURRENT_DATE()) 
+	,TRIM(T.EMPLOYEE_ID)					AS FLEX_ID
+	,T.ORIGINAL_HIRE_DATE					AS ORIGINAL_HIRE_DATE
+	,T.REHIRE_DATE							AS REHIRE_DATE
+	,CASE 
+		WHEN ( SPLIT_PART(TRIM(T."Name"), ' ', 3) IN ('-', '.', ',', '') OR LENGTH(SPLIT_PART(TRIM(T."Name"), ' ', 3)) < 3 ) 
+			AND SPLIT_PART(TRIM(T."Name"), ' ', 4) <> '' THEN SPLIT_PART(TRIM(T."Name"), ' ', 4)
+		WHEN SPLIT_PART(TRIM(T."Name"), ' ', 3) IN ('-', '.', ',', '') AND SPLIT_PART(TRIM(T."Name"), ' ', 4) = '' THEN SPLIT_PART(TRIM(T."Name"), ' ', 2)  --SOME employees have ONLY 1 initial FOR LAST NAME cannot use -> AND LENGTH(SPLIT_PART(TRIM(T."Name"), ' ', 2)) > 1
+		ELSE SPLIT_PART(TRIM(T."Name"), ' ', 3) 
+	 END 									AS LAST_NAME
+	,SPLIT_PART(TRIM(T."Name"), ' ', 1) 	AS FIRST_NAME
+	,TRIM(TITLE)							AS TITLE
+	,LEFT(TRIM(T.LEGAL_ENTITY),3)			AS COMPANY 
+	,LEFT(TRIM(T.COST_CENTER),4)			AS COST_CENTER 
+	,TRIM(T.COUNTRY)						AS COUNTRY 
+	,TRIM(T.PHYSICAL_LOCATION)				AS PHYSICAL_LOCATION 
+	,TRIM(T.LIVED_IN_STATE)					AS LIVED_IN_STATE 
+	,CASE 
+		WHEN T.EMPLOYEE_CLASS = 'Fixed Term Contract' THEN 'FTC'
+                WHEN T.EMPLOYEE_CLASS = 'Intern/Co-op/Student' THEN 'Student'
+                WHEN T.EMPLOYEE_CLASS is NULL THEN ‘MISSING’
+                                ELSE ‘ERROR’ 
+		END  AS EMPLOYEE_CLASS
+		AS EMPLOYEE_CLASS
+	,CASE WHEN UPPER(TRIM(T.EMPLOYEE_CLASS)) IN ('FTC' ,'Student') THEN 'T'
+		  WHEN T.FTE < 1 THEN 'PT'
+		  ELSE 'FT'
+	 END 										AS EMPLOYEE_TYPE
+	,TRIM(T.BUSINESS_UNIT)					AS BUSINESS_UNIT 
+	,TRIM(T.FUNCTIONAL_AREA)				AS FUNCTIONAL_AREA 
+	,CASE WHEN EMPLOYEE_TYPE = 'T' THEN 1 
+	      ELSE T.FTE END					AS FTE  -- Internal FP&A wants to see Temps at 1 for now according to zack (they are filtered out by default in PBI)
+	,NULL									AS SUB_FUNCTION --New tiers an no longer needed 3/1/2021
+	,CP.REGION 								AS REGION
+	,1										AS HEADCOUNT  -- Was not 1 for all prior .. changed 3/4/21
+	, TRIM(T.EMPLOYEE_CLASS) 				AS EMPLOYEE_CLASS --add to reconcile with HR's breakout 
+	, TRIM(T.JOB_CODE) 						AS JOB_CODE
+	, TRIM(T.CASH_INCENTIVE_TYPE)			AS CASH_INCENTIVE_TYPE  --NEW ADD FOR DEC 2021 file
+	FROM FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_TEMP T
+	LEFT JOIN FPA_SBX_ENV_USER.COMPANY_MAP_T CP ON
+		CP.COMPANY = LEFT(T.LEGAL_ENTITY, 3)
+	LEFT JOIN FPA_SBX_ENV_USER.COST_CENTER_MAP_T CC ON
+		CC.COST_CENTER = LEFT(T.COST_CENTER, 4)
+);
+
+
+--ALTER TABLE FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_T ADD COLUMN EMPLOYEE_CLASS VARCHAR;
+
+-- Update statements if needed
+--UPDATE FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_T
+--	SET COST_CENTER = LEFT(LTRIM(COST_CENTER), 4);
+--
+--SELECT DISTINCT COST_CENTER FROM FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_T;
+--
+--UPDATE FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_T
+--	SET COMPANY = LEFT(LTRIM(COMPANY), 3);
+--
+--SELECT DISTINCT COMPANY FROM FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_T;
+
+--FTE quality check
+SELECT 
+"YEAR"
+,"MONTH"
+,EMPLOYEE_TYPE
+,EMPLOYEE_CLASS
+,SUM(FTE)
+,SUM(HEADCOUNT)
+,COUNT(*)
+FROM FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_T
+GROUP BY 1, 2,3,4
+ORDER BY 1 DESC,2 DESC;
+
+--duplicate check
+SELECT 
+"YEAR"
+,"MONTH"
+,FLEX_ID
+,COUNT(*)
+FROM FPA_SBX_ENV_USER.HEADCOUNT_EXISTING_EMPLOYEES_T
+GROUP BY 1, 2,3
+HAVING COUNT(*) >1;
